@@ -491,13 +491,21 @@ def _format_value(value):
         return str(value)
 
 def compare_plists(original, current, path="Root"):
+    """Compare two plist data structures and return a list of changes.
+
+    Returns a list of tuples describing each difference found:
+        ("added", path, type_name, formatted_value)
+        ("removed", path, type_name, formatted_value)
+        ("value_changed", path, old_formatted_value, new_formatted_value)
+        ("type_changed", path, old_type, new_type, old_value, new_value)
+    """
     changes = []
     _compare_stack = deque()
     _compare_stack.append((original, current, path))
     while _compare_stack:
         orig, curr, p = _compare_stack.popleft()
         if type(orig) != type(curr):
-            # Allow dict subclass comparison (OrderedDict vs dict)
+            # Allow dict subclass comparison (e.g. OrderedDict vs dict)
             if isinstance(orig, dict) and isinstance(curr, dict):
                 pass # Both are dict types, proceed
             elif isinstance(orig, list) and isinstance(curr, list):
