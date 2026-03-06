@@ -1,0 +1,3 @@
+[submodule "OCConfigCompare"]
+	path = OCConfigCompare
+	url = https://github.com/corpnewt/OCConfigCompare.git

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import sys, os, plistlib, base64, binascii, datetime, tempfile, shutil, re, subprocess, math, hashlib, time
+import sys, os, plistlib, base64, binascii, datetime, tempfile, shutil, re, subprocess, math, hashlib, time, copy
 
 from collections import OrderedDict, deque
 from io import BytesIO
@@ -454,6 +454,265 @@ class EntryPopup(EntryPlus):
         # Call cancel to close the popup as we're done editing
         self.cancel(event)
 
+def _get_type_name(value):
+    if isinstance(value, dict):
+        return "Dictionary"
+    elif isinstance(value, list):
+        return "Array"
+    elif isinstance(value, datetime.datetime):
+        return "Date"
+    elif isinstance(value, bool):
+        return "Boolean"
+    elif isinstance(value, bytes):
+        return "Data"
+    elif sys.version_info < (3,0) and isinstance(value, plistlib.Data):
+        return "Data"
+    elif isinstance(value, (int,float)):
+        return "Number"
+    elif isinstance(value, basestring):
+        return "String"
+    else:
+        return str(type(value))
+
+def _format_value(value):
+    if isinstance(value, bool):
+        return str(value)
+    elif isinstance(value, bytes):
+        return "<{}>".format(binascii.hexlify(value).decode("utf-8").upper())
+    elif sys.version_info < (3,0) and isinstance(value, plistlib.Data):
+        return "<{}>".format(binascii.hexlify(value.data).decode("utf-8").upper())
+    elif isinstance(value, dict):
+        return "({} items)".format(len(value))
+    elif isinstance(value, list):
+        return "({} items)".format(len(value))
+    elif isinstance(value, datetime.datetime):
+        return str(value)
+    else:
+        return str(value)
+
+def compare_plists(original, current, path="Root"):
+    """Compare two plist data structures and return a list of changes.
+
+    Returns a list of tuples describing each difference found:
+        ("added", path, type_name, formatted_value)
+        ("removed", path, type_name, formatted_value)
+        ("value_changed", path, old_formatted_value, new_formatted_value)
+        ("type_changed", path, old_type, new_type, old_value, new_value)
+    """
+    changes = []
+    _compare_stack = deque()
+    _compare_stack.append((original, current, path))
+    while _compare_stack:
+        orig, curr, p = _compare_stack.popleft()
+        if type(orig) != type(curr):
+            # Allow dict subclass comparison (e.g. OrderedDict vs dict)
+            if isinstance(orig, dict) and isinstance(curr, dict):
+                pass # Both are dict types, proceed
+            elif isinstance(orig, list) and isinstance(curr, list):
+                pass
+            else:
+                changes.append(("type_changed", p,
+                    _get_type_name(orig), _get_type_name(curr),
+                    _format_value(orig), _format_value(curr)))
+                continue
+        if isinstance(orig, dict):
+            orig_keys = set(orig.keys())
+            curr_keys = set(curr.keys())
+            removed_keys = orig_keys - curr_keys
+            added_keys = curr_keys - orig_keys
+            common_keys = orig_keys & curr_keys
+            for k in sorted(removed_keys):
+                changes.append(("removed", p + " -> " + str(k),
+                    _get_type_name(orig[k]), _format_value(orig[k])))
+            for k in sorted(added_keys):
+                changes.append(("added", p + " -> " + str(k),
+                    _get_type_name(curr[k]), _format_value(curr[k])))
+            for k in sorted(common_keys):
+                _compare_stack.append((orig[k], curr[k], p + " -> " + str(k)))
+        elif isinstance(orig, list):
+            max_len = max(len(orig), len(curr))
+            for i in range(max_len):
+                if i >= len(orig):
+                    changes.append(("added", p + " -> [{}]".format(i),
+                        _get_type_name(curr[i]), _format_value(curr[i])))
+                elif i >= len(curr):
+                    changes.append(("removed", p + " -> [{}]".format(i),
+                        _get_type_name(orig[i]), _format_value(orig[i])))
+                else:
+                    _compare_stack.append((orig[i], curr[i], p + " -> [{}]".format(i)))
+        else:
+            if orig != curr:
+                changes.append(("value_changed", p,
+                    _format_value(orig), _format_value(curr)))
+    return changes
+
+class DiffWindow(tk.Toplevel):
+    def __init__(self, parent, changes, title="View Changes"):
+        tk.Toplevel.__init__(self, parent)
+        self.title(title)
+        self.minsize(width=600, height=400)
+        w = 730
+        h = 480
+        x = self.winfo_screenwidth() // 2 - w // 2
+        y = self.winfo_screenheight() // 2 - h // 2
+        self.geometry("{}x{}+{}+{}".format(w, h, x, y))
+
+        frame = tk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Summary label
+        added = sum(1 for c in changes if c[0] == "added")
+        removed = sum(1 for c in changes if c[0] == "removed")
+        changed = sum(1 for c in changes if c[0] in ("value_changed", "type_changed"))
+        summary = "Changes: {} added, {} removed, {} modified".format(added, removed, changed)
+        summary_label = tk.Label(frame, text=summary, anchor="w")
+        summary_label.pack(fill="x", pady=(0, 5))
+
+        # Text widget with scrollbar
+        text_frame = tk.Frame(frame)
+        text_frame.pack(fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        self.text = tk.Text(text_frame, wrap="word", yscrollcommand=scrollbar.set,
+                            state="normal", font=("TkFixedFont",))
+        self.text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.text.yview)
+
+        # Configure tags for color coding
+        self.text.tag_configure("added", foreground="#228B22")
+        self.text.tag_configure("removed", foreground="#DC143C")
+        self.text.tag_configure("changed", foreground="#1E90FF")
+        self.text.tag_configure("header", font=("TkFixedFont", 10, "bold"))
+        self.text.tag_configure("no_changes", foreground="#666666")
+
+        # Populate the text widget
+        self._populate(changes)
+
+        # Make text read-only
+        self.text.config(state="disabled")
+
+        # Close button
+        close_btn = ttk.Button(frame, text="Close", command=self.destroy)
+        close_btn.pack(pady=(5, 0))
+
+        # Bind Escape to close
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _populate(self, changes):
+        if not changes:
+            self.text.insert("end", "No changes detected.\n", "no_changes")
+            return
+
+        # Group changes by type
+        added = [c for c in changes if c[0] == "added"]
+        removed = [c for c in changes if c[0] == "removed"]
+        value_changed = [c for c in changes if c[0] == "value_changed"]
+        type_changed = [c for c in changes if c[0] == "type_changed"]
+
+        if added:
+            self.text.insert("end", "=== Added ({}) ===\n".format(len(added)), "header")
+            for c in added:
+                # c = ("added", path, type_name, value)
+                self.text.insert("end", "+ {} ({}): {}\n".format(c[1], c[2], c[3]), "added")
+            self.text.insert("end", "\n")
+
+        if removed:
+            self.text.insert("end", "=== Removed ({}) ===\n".format(len(removed)), "header")
+            for c in removed:
+                # c = ("removed", path, type_name, value)
+                self.text.insert("end", "- {} ({}): {}\n".format(c[1], c[2], c[3]), "removed")
+            self.text.insert("end", "\n")
+
+        if value_changed:
+            self.text.insert("end", "=== Value Changes ({}) ===\n".format(len(value_changed)), "header")
+            for c in value_changed:
+                # c = ("value_changed", path, old_value, new_value)
+                self.text.insert("end", "~ {}\n".format(c[1]), "changed")
+                self.text.insert("end", "    {} -> {}\n".format(c[2], c[3]), "changed")
+            self.text.insert("end", "\n")
+
+        if type_changed:
+            self.text.insert("end", "=== Type Changes ({}) ===\n".format(len(type_changed)), "header")
+            for c in type_changed:
+                # c = ("type_changed", path, old_type, new_type, old_value, new_value)
+                self.text.insert("end", "~ {}\n".format(c[1]), "changed")
+                self.text.insert("end", "    {} ({}) -> {} ({})\n".format(
+                    c[2], c[4], c[3], c[5]), "changed")
+            self.text.insert("end", "\n")
+
+class TextResultWindow(tk.Toplevel):
+    def __init__(self, parent, text_output, title="OC Config Compare"):
+        tk.Toplevel.__init__(self, parent)
+        self.title(title)
+        self.minsize(width=600, height=400)
+        w = 730
+        h = 480
+        x = self.winfo_screenwidth() // 2 - w // 2
+        y = self.winfo_screenheight() // 2 - h // 2
+        self.geometry("{}x{}+{}+{}".format(w, h, x, y))
+
+        frame = tk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Text widget with scrollbar
+        text_frame = tk.Frame(frame)
+        text_frame.pack(fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        self.text = tk.Text(text_frame, wrap="word", yscrollcommand=scrollbar.set,
+                            state="normal", font=("TkFixedFont",))
+        self.text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.text.yview)
+
+        # Configure tags for color coding
+        self.text.tag_configure("missing", foreground="#DC143C")
+        self.text.tag_configure("type_diff", foreground="#1E90FF")
+        self.text.tag_configure("value_diff", foreground="#FF8C00")
+        self.text.tag_configure("header", font=("TkFixedFont", 10, "bold"))
+        self.text.tag_configure("ok", foreground="#228B22")
+        self.text.tag_configure("normal", foreground="")
+
+        # Populate the text widget
+        self._populate(text_output)
+
+        # Make text read-only
+        self.text.config(state="disabled")
+
+        # Close button
+        close_btn = ttk.Button(frame, text="Close", command=self.destroy)
+        close_btn.pack(pady=(5, 0))
+
+        # Bind Escape to close
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _populate(self, text_output):
+        for line in text_output.split("\n"):
+            stripped = line.strip()
+            if "Missing Key:" in stripped:
+                self.text.insert("end", line + "\n", "missing")
+            elif "Type Difference:" in stripped:
+                self.text.insert("end", line + "\n", "type_diff")
+            elif "Value Difference:" in stripped:
+                self.text.insert("end", line + "\n", "value_diff")
+            elif stripped.startswith("Checking for values"):
+                self.text.insert("end", line + "\n", "header")
+            elif stripped.startswith("- Nothing missing"):
+                self.text.insert("end", line + "\n", "ok")
+            else:
+                self.text.insert("end", line + "\n", "normal")
+
+def _get_oc_config_compare_path():
+    """Return the path to OCConfigCompare.py if the submodule is available."""
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    occc_path = os.path.join(script_dir, "OCConfigCompare", "OCConfigCompare.py")
+    if os.path.isfile(occc_path):
+        return occc_path
+    return None
+
 class PlistWindow(tk.Toplevel):
     def __init__(self, controller, root, **kw):
         tk.Toplevel.__init__(self, root, **kw)
@@ -466,6 +725,7 @@ class PlistWindow(tk.Toplevel):
         self.controller = controller
         self.undo_stack = deque()
         self.redo_stack = deque()
+        self.original_plist_data = None
         self.drag_undo = None
         self.clicked_drag = False
         self.saving = False
@@ -661,9 +921,11 @@ class PlistWindow(tk.Toplevel):
             file_menu.add_command(label="Save As...", command=self.controller.save_plist_as, accelerator="Ctrl+Shift+S")
             file_menu.add_command(label="Duplicate", command=self.controller.duplicate_plist, accelerator="Ctrl+D")
             file_menu.add_command(label="Reload From Disk", command=self.reload_from_disk, accelerator="Ctrl+L")
+            file_menu.add_command(label="View Changes", command=self.controller.view_changes, accelerator="Ctrl+Shift+D")
             file_menu.add_separator()
             file_menu.add_command(label="OC Snapshot", command=self.oc_snapshot, accelerator="Ctrl+R")
             file_menu.add_command(label="OC Clean Snapshot", command=self.oc_clean_snapshot, accelerator="Ctrl+Shift+R")
+            file_menu.add_command(label="OC Config Compare", command=self.controller.oc_config_compare, accelerator="Ctrl+Shift+C")
             file_menu.add_separator()
             file_menu.add_command(label="Convert Window", command=lambda:self.controller.show_window(self.controller.tk), accelerator="Ctrl+T")
             file_menu.add_command(label="Strip Comments", command=self.strip_comments, accelerator="Ctrl+M")
@@ -2868,6 +3130,63 @@ class PlistWindow(tk.Toplevel):
             return self.save_plist()
         return answer
 
+    def view_changes(self, event=None):
+        current_data = self.nodes_to_values(binary=False)
+        original = self.original_plist_data if self.original_plist_data is not None else {}
+        changes = compare_plists(original, current_data)
+        title = "Changes - {}".format(self.get_title())
+        DiffWindow(self, changes, title=title)
+
+    def oc_config_compare(self, event=None, sample_path=None):
+        occc_path = _get_oc_config_compare_path()
+        if occc_path is None:
+            self.bell()
+            mb.showerror(
+                "OCConfigCompare Not Found",
+                "The OCConfigCompare submodule was not found.\n\n"
+                "Please ensure the OCConfigCompare submodule is initialized:\n"
+                "  git submodule update --init",
+                parent=self
+            )
+            return
+        # Save current plist data to a temp file
+        plist_data = self.nodes_to_values(binary=False)
+        temp = tempfile.mkdtemp()
+        temp_file = os.path.join(temp, self.get_title())
+        try:
+            with open(temp_file, "wb") as f:
+                plist.dump(plist_data, f, sort_keys=self.controller.settings.get("sort_dict", False))
+            # Build the OCConfigCompare command
+            # -u: user plist path, -m yes: compare values, -n: no prefix hiding, -r: use latest release sample
+            cmd = [sys.executable, occc_path, "-u", temp_file, "-m", "yes", "-n"]
+            if sample_path:
+                # -s: path to local sample plist
+                cmd.extend(["-s", sample_path])
+            else:
+                cmd.extend(["-r"])
+            # Run OCConfigCompare as a subprocess
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = proc.communicate()
+            if sys.version_info >= (3, 0):
+                stdout = stdout.decode("utf-8", errors="replace")
+                stderr = stderr.decode("utf-8", errors="replace")
+            output = stdout.strip()
+            if not output and stderr.strip():
+                output = "Error running OCConfigCompare:\n" + stderr.strip()
+            elif not output:
+                output = "No output from OCConfigCompare."
+            title = "OC Config Compare - {}".format(self.get_title())
+            TextResultWindow(self, output, title=title)
+        except Exception as e:
+            self.bell()
+            mb.showerror("Error Running OCConfigCompare", str(e), parent=self)
+        finally:
+            shutil.rmtree(temp, ignore_errors=True)
+
     def save_plist(self, event=None):
         # Pass the current plist to the save_plist_as function
         return self.save_plist_as(event, self.current_plist)
@@ -2993,10 +3312,13 @@ class PlistWindow(tk.Toplevel):
         self.title(path)
         # No changes - so we'll reset that
         self._ensure_edited(edited=False)
+        # Update the original plist data to reflect the saved state
+        self.original_plist_data = copy.deepcopy(plist_data)
         return True
 
     def open_plist(self, path, plist_data, plist_type = "XML", auto_expand = True, alternate = True, title = None):
         # Opened it correctly - let's load it, and set our values
+        self.original_plist_data = copy.deepcopy(plist_data)
         self.plist_type_string.set(plist_type)
         self._tree.delete(*self._tree.get_children())
         self.add_node(plist_data,check_binary=plist_type.lower() == "binary")
