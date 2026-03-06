@@ -642,6 +642,77 @@ class DiffWindow(tk.Toplevel):
                     c[2], c[4], c[3], c[5]), "changed")
             self.text.insert("end", "\n")
 
+class TextResultWindow(tk.Toplevel):
+    def __init__(self, parent, text_output, title="OC Config Compare"):
+        tk.Toplevel.__init__(self, parent)
+        self.title(title)
+        self.minsize(width=600, height=400)
+        w = 730
+        h = 480
+        x = self.winfo_screenwidth() // 2 - w // 2
+        y = self.winfo_screenheight() // 2 - h // 2
+        self.geometry("{}x{}+{}+{}".format(w, h, x, y))
+
+        frame = tk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Text widget with scrollbar
+        text_frame = tk.Frame(frame)
+        text_frame.pack(fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+
+        self.text = tk.Text(text_frame, wrap="word", yscrollcommand=scrollbar.set,
+                            state="normal", font=("TkFixedFont",))
+        self.text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.text.yview)
+
+        # Configure tags for color coding
+        self.text.tag_configure("missing", foreground="#DC143C")
+        self.text.tag_configure("type_diff", foreground="#1E90FF")
+        self.text.tag_configure("value_diff", foreground="#FF8C00")
+        self.text.tag_configure("header", font=("TkFixedFont", 10, "bold"))
+        self.text.tag_configure("ok", foreground="#228B22")
+        self.text.tag_configure("normal", foreground="")
+
+        # Populate the text widget
+        self._populate(text_output)
+
+        # Make text read-only
+        self.text.config(state="disabled")
+
+        # Close button
+        close_btn = ttk.Button(frame, text="Close", command=self.destroy)
+        close_btn.pack(pady=(5, 0))
+
+        # Bind Escape to close
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _populate(self, text_output):
+        for line in text_output.split("\n"):
+            stripped = line.strip()
+            if "Missing Key:" in stripped:
+                self.text.insert("end", line + "\n", "missing")
+            elif "Type Difference:" in stripped:
+                self.text.insert("end", line + "\n", "type_diff")
+            elif "Value Difference:" in stripped:
+                self.text.insert("end", line + "\n", "value_diff")
+            elif stripped.startswith("Checking for values"):
+                self.text.insert("end", line + "\n", "header")
+            elif stripped.startswith("- Nothing missing"):
+                self.text.insert("end", line + "\n", "ok")
+            else:
+                self.text.insert("end", line + "\n", "normal")
+
+def _get_oc_config_compare_path():
+    """Return the path to OCConfigCompare.py if the submodule is available."""
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    occc_path = os.path.join(script_dir, "OCConfigCompare", "OCConfigCompare.py")
+    if os.path.isfile(occc_path):
+        return occc_path
+    return None
+
 class PlistWindow(tk.Toplevel):
     def __init__(self, controller, root, **kw):
         tk.Toplevel.__init__(self, root, **kw)
@@ -854,6 +925,7 @@ class PlistWindow(tk.Toplevel):
             file_menu.add_separator()
             file_menu.add_command(label="OC Snapshot", command=self.oc_snapshot, accelerator="Ctrl+R")
             file_menu.add_command(label="OC Clean Snapshot", command=self.oc_clean_snapshot, accelerator="Ctrl+Shift+R")
+            file_menu.add_command(label="OC Config Compare", command=self.controller.oc_config_compare, accelerator="Ctrl+Shift+C")
             file_menu.add_separator()
             file_menu.add_command(label="Convert Window", command=lambda:self.controller.show_window(self.controller.tk), accelerator="Ctrl+T")
             file_menu.add_command(label="Strip Comments", command=self.strip_comments, accelerator="Ctrl+M")
@@ -3064,6 +3136,57 @@ class PlistWindow(tk.Toplevel):
         changes = compare_plists(original, current_data)
         title = "Changes - {}".format(self.get_title())
         DiffWindow(self, changes, title=title)
+
+    def oc_config_compare(self, event=None, sample_path=None):
+        occc_path = _get_oc_config_compare_path()
+        if occc_path is None:
+            self.bell()
+            mb.showerror(
+                "OCConfigCompare Not Found",
+                "The OCConfigCompare submodule was not found.\n\n"
+                "Please ensure the OCConfigCompare submodule is initialized:\n"
+                "  git submodule update --init",
+                parent=self
+            )
+            return
+        # Save current plist data to a temp file
+        plist_data = self.nodes_to_values(binary=False)
+        temp = tempfile.mkdtemp()
+        temp_file = os.path.join(temp, self.get_title())
+        try:
+            with open(temp_file, "wb") as f:
+                plist.dump(plist_data, f, sort_keys=self.controller.settings.get("sort_dict", False))
+            # Build the OCConfigCompare command
+            cmd = [sys.executable, occc_path, "-u", temp_file, "-m", "yes", "-n"]
+            if sample_path:
+                cmd.extend(["-s", sample_path])
+            else:
+                cmd.extend(["-r"])
+            # Run OCConfigCompare as a subprocess
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = proc.communicate()
+            if sys.version_info >= (3, 0):
+                stdout = stdout.decode("utf-8", errors="replace")
+                stderr = stderr.decode("utf-8", errors="replace")
+            output = stdout.strip()
+            if not output and stderr.strip():
+                output = "Error running OCConfigCompare:\n" + stderr.strip()
+            elif not output:
+                output = "No output from OCConfigCompare."
+            title = "OC Config Compare - {}".format(self.get_title())
+            TextResultWindow(self, output, title=title)
+        except Exception as e:
+            self.bell()
+            mb.showerror("Error Running OCConfigCompare", str(e), parent=self)
+        finally:
+            try:
+                shutil.rmtree(temp, ignore_errors=True)
+            except:
+                pass
 
     def save_plist(self, event=None):
         # Pass the current plist to the save_plist_as function

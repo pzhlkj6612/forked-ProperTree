@@ -423,6 +423,7 @@ class ProperTree:
             file_menu.add_separator()
             file_menu.add_command(label="OC Snapshot (Cmd+R)", command=self.oc_snapshot)
             file_menu.add_command(label="OC Clean Snapshot (Cmd+Shift+R)", command=self.oc_clean_snapshot)
+            file_menu.add_command(label="OC Config Compare (Cmd+Shift+C)", command=self.oc_config_compare)
             file_menu.add_separator()
             file_menu.add_command(label="Convert Window (Cmd+T)", command=lambda:self.show_window(self.tk))
             file_menu.add_command(label="Strip Comments (Cmd+M)", command=self.strip_comments)
@@ -455,6 +456,7 @@ class ProperTree:
         self.tk.bind_all("<{}-k>".format(key), lambda x:self.strip_whitespace(keys=True,values=True))
         self.tk.bind_all("<{}-r>".format(key), self.oc_snapshot)
         self.tk.bind_all("<{}-Shift-R>".format(key), self.oc_clean_snapshot)
+        self.tk.bind_all("<{}-Shift-C>".format(key), self.oc_config_compare)
         self.tk.bind_all("<{}-l>".format(key), self.reload_from_disk)
         self.tk.bind_all("<{}-Shift-D>".format(key), self.view_changes)
         if not str(sys.platform) == "darwin":
@@ -1823,6 +1825,15 @@ class ProperTree:
         if window in self.default_windows:
             return
         window.view_changes(event)
+
+    def oc_config_compare(self, event = None):
+        windows = self.stackorder(self.tk)
+        if not len(windows):
+            return
+        window = windows[-1]
+        if window in self.default_windows:
+            return
+        window.oc_config_compare(event)
 
     def undo(self, event = None):
         windows = self.stackorder(self.tk)
