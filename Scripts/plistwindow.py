@@ -3157,8 +3157,10 @@ class PlistWindow(tk.Toplevel):
             with open(temp_file, "wb") as f:
                 plist.dump(plist_data, f, sort_keys=self.controller.settings.get("sort_dict", False))
             # Build the OCConfigCompare command
+            # -u: user plist path, -m yes: compare values, -n: no prefix hiding, -r: use latest release sample
             cmd = [sys.executable, occc_path, "-u", temp_file, "-m", "yes", "-n"]
             if sample_path:
+                # -s: path to local sample plist
                 cmd.extend(["-s", sample_path])
             else:
                 cmd.extend(["-r"])
@@ -3183,10 +3185,7 @@ class PlistWindow(tk.Toplevel):
             self.bell()
             mb.showerror("Error Running OCConfigCompare", str(e), parent=self)
         finally:
-            try:
-                shutil.rmtree(temp, ignore_errors=True)
-            except:
-                pass
+            shutil.rmtree(temp, ignore_errors=True)
 
     def save_plist(self, event=None):
         # Pass the current plist to the save_plist_as function
